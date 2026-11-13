@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import sqlite3
 
 app = FastAPI(title="API de Marcación de Rondas")
@@ -13,7 +13,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # Inicializar la base de datos SQLite
 def init_db():
@@ -32,9 +31,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 init_db()
-
 
 class MarcacionRequest(BaseModel):
     nombre_guardia: str
@@ -42,28 +39,27 @@ class MarcacionRequest(BaseModel):
     latitud: float | None = None
     longitud: float | None = None
 
-
 @app.post("/api/marcar")
 def registrar_marcacion(datos: MarcacionRequest):
-    hora_servidor = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Definir la zona horaria de Paraguay (UTC-3)
+    py_zone = timezone(timedelta(hours=-3))
+    hora_paraguay = datetime.now(py_zone).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Guardar en la base de datos SQLite
     conn = sqlite3.connect("rondas.db")
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO marcaciones (nombre_guardia, puesto, latitud, longitud, fecha_hora)
         VALUES (?, ?, ?, ?, ?)
-    """, (datos.nombre_guardia, datos.puesto, datos.latitud, datos.longitud, hora_servidor))
+    """, (datos.nombre_guardia, datos.puesto, datos.latitud, datos.longitud, hora_paraguay))
     conn.commit()
     conn.close()
 
     return {
         "status": "success",
         "mensaje": "Marcación guardada en la base de datos",
-        "hora_registro": hora_servidor,
+        "hora_registro": hora_paraguay,
         "datos": datos.dict()
     }
-
 
 @app.get("/api/marcaciones")
 def listar_marcaciones():
@@ -73,8 +69,21 @@ def listar_marcaciones():
     cursor.execute("SELECT * FROM marcaciones ORDER BY id DESC")
     filas = cursor.fetchall()
     conn.close()
-    return [dict(fila) for fila in filas]
-
+    
+    resultado = []
+    for fila in filas:
+        registro = dict(fila)
+        lat = registro.get("latitud")
+        lon = registro.get("longitud")
+        
+        if lat is not None and lon is not None:
+            registro["google_maps"] = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+        else:
+            registro["google_maps"] = None
+            
+        resultado.append(registro)
+        
+    return resultado
 
 @app.get("/")
 def home():
