@@ -41,6 +41,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5500",
         "http://127.0.0.1:5500",
+        "http://localhost:63342",
         "https://panel-admin-rondas.onrender.com"
     ],
     allow_credentials=True,
@@ -118,7 +119,8 @@ class MarcacionRequest(BaseModel):
 
 class CambiarEstado(BaseModel):
     activo: bool
-
+class EditarPuntoRequest(BaseModel):
+    nombre: str = Field(min_length=2, max_length=100)
 
 class CrearPuntos(BaseModel):
     zona_id: int = Field(gt=0)
@@ -443,7 +445,98 @@ def cambiar_cuenta_admin(
 # --------------------------------------------------
 # ADMIN: GENERACIÓN Y CALIBRACIÓN DE PUNTOS QR
 # --------------------------------------------------
+@app.get("/api/admin/puntos")
+def listar_puntos(admin: dict = Depends(solo_admin)):
+    """Lista los puntos QR sin exponer hashes ni tokens secretos."""
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    p.id,
+                    p.zona_id,
+                    z.nombre AS zona_nombre,
+                    p.numero,
+                    p.nombre,
+                    p.activo,
+                    p.latitud,
+                    p.longitud,
+                    p.radio_metros
+                FROM puntos p
+                INNER JOIN zonas z ON z.id = p.zona_id
+                ORDER BY p.zona_id, p.numero
+            """)
+            puntos = cur.fetchall()
 
+    return {"puntos": puntos}
+
+
+@app.patch("/api/admin/puntos/{punto_id}")
+def editar_punto(
+    punto_id: int,
+    datos: EditarPuntoRequest,
+    admin: dict = Depends(solo_admin)
+):
+    """Cambia el nombre sin modificar el código QR ni las marcaciones."""
+    nombre = datos.nombre.strip()
+
+    if not nombre:
+        raise HTTPException(
+            status_code=400,
+            detail="El nombre del punto es obligatorio"
+        )
+
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE puntos
+                SET nombre = %s
+                WHERE id = %s
+                RETURNING id, zona_id, numero, nombre, activo,
+                          latitud, longitud, radio_metros
+            """, (nombre, punto_id))
+
+            punto = cur.fetchone()
+
+    if not punto:
+        raise HTTPException(
+            status_code=404,
+            detail="Punto QR no encontrado"
+        )
+
+    return {
+        "mensaje": "Punto actualizado correctamente",
+        "punto": punto
+    }
+
+
+@app.patch("/api/admin/puntos/{punto_id}/estado")
+def cambiar_estado_punto(
+    punto_id: int,
+    datos: CambiarEstado,
+    admin: dict = Depends(solo_admin)
+):
+    """Activa o desactiva un punto sin borrar su historial."""
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE puntos
+                SET activo = %s
+                WHERE id = %s
+                RETURNING id, zona_id, numero, nombre, activo
+            """, (datos.activo, punto_id))
+
+            punto = cur.fetchone()
+
+    if not punto:
+        raise HTTPException(
+            status_code=404,
+            detail="Punto QR no encontrado"
+        )
+
+    return {
+        "mensaje": "Estado del punto actualizado correctamente",
+        "punto": punto
+    }
 @app.post("/api/admin/puntos/generar")
 def generar_puntos(
     datos: CrearPuntos,
