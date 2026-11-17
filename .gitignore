@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+codigos_qr/
+tokens_qr.txt
+etiquetas_qr_A4.pdf
