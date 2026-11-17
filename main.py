@@ -99,7 +99,14 @@ class CambiarPassword(BaseModel):
 class CambiarZona(BaseModel):
     zona_id: int = Field(gt=0)
 
-
+class CambiarUsername(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+class ZonaRequest(BaseModel):
+    nombre: str = Field(min_length=2, max_length=100)
+class CambiarCuentaAdmin(BaseModel):
+    password_actual: str
+    nuevo_username: str = Field(min_length=3, max_length=50)
+    nueva_password: str | None = Field(default=None, min_length=8)
 class MarcacionRequest(BaseModel):
     qr_token: str = Field(min_length=20, max_length=200)
     latitud: float = Field(ge=-90, le=90, allow_inf_nan=False)
@@ -260,7 +267,178 @@ def listar_zonas(usuario=Depends(obtener_usuario)):
 
             return cur.fetchall()
 
+@app.post("/api/admin/zonas")
+def crear_zona(
+    datos: ZonaRequest,
+    usuario: dict = Depends(solo_admin)
+):
+    nombre = datos.nombre.strip()
 
+    if not nombre:
+        raise HTTPException(
+            status_code=400,
+            detail="El nombre de la zona es obligatorio"
+        )
+
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id FROM zonas
+                WHERE LOWER(nombre) = LOWER(%s)
+                """,
+                (nombre,)
+            )
+
+            if cur.fetchone():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ya existe una zona con ese nombre"
+                )
+
+            cur.execute(
+                """
+                INSERT INTO zonas (nombre, activa)
+                VALUES (%s, TRUE)
+                RETURNING id, nombre, activa
+                """,
+                (nombre,)
+            )
+
+            zona = cur.fetchone()
+
+    return zona
+@app.patch("/api/admin/zonas/{zona_id}")
+def editar_zona(
+    zona_id: int,
+    datos: ZonaRequest,
+    usuario: dict = Depends(solo_admin)
+):
+    nombre = datos.nombre.strip()
+
+    if not nombre:
+        raise HTTPException(
+            status_code=400,
+            detail="El nombre de la zona es obligatorio"
+        )
+
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id FROM zonas
+                WHERE LOWER(nombre) = LOWER(%s)
+                AND id != %s
+                """,
+                (nombre, zona_id)
+            )
+
+            if cur.fetchone():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ya existe otra zona con ese nombre"
+                )
+
+            cur.execute(
+                """
+                UPDATE zonas
+                SET nombre = %s
+                WHERE id = %s
+                RETURNING id, nombre, activa
+                """,
+                (nombre, zona_id)
+            )
+
+            zona = cur.fetchone()
+
+            if not zona:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Zona no encontrada"
+                )
+
+    return zona
+@app.patch("/api/admin/mi-cuenta")
+def cambiar_cuenta_admin(
+    datos: CambiarCuentaAdmin,
+    usuario: dict = Depends(solo_admin)
+):
+    nuevo_username = datos.nuevo_username.strip()
+
+    if not nuevo_username:
+        raise HTTPException(
+            status_code=400,
+            detail="El nombre de usuario es obligatorio"
+        )
+
+    with conectar() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT id, username, password_hash
+                FROM usuarios
+                WHERE id = %s AND rol = 'admin'
+                """,
+                (usuario["id"],)
+            )
+
+            admin = cur.fetchone()
+
+            if not admin:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Administrador no encontrado"
+                )
+
+            if not password_hash.verify(
+                datos.password_actual,
+                admin["password_hash"]
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="La contraseña actual es incorrecta"
+                )
+
+            cur.execute(
+                """
+                SELECT id FROM usuarios
+                WHERE username = %s AND id != %s
+                """,
+                (nuevo_username, usuario["id"])
+            )
+
+            if cur.fetchone():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ese nombre de usuario ya está en uso"
+                )
+
+            if datos.nueva_password:
+                nuevo_hash = password_hash.hash(datos.nueva_password)
+
+                cur.execute(
+                    """
+                    UPDATE usuarios
+                    SET username = %s, password_hash = %s
+                    WHERE id = %s
+                    """,
+                    (nuevo_username, nuevo_hash, usuario["id"])
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE usuarios
+                    SET username = %s
+                    WHERE id = %s
+                    """,
+                    (nuevo_username, usuario["id"])
+                )
+
+    return {
+        "mensaje": "Cuenta actualizada correctamente",
+        "username": nuevo_username
+    }
 # --------------------------------------------------
 # ADMIN: GENERACIÓN Y CALIBRACIÓN DE PUNTOS QR
 # --------------------------------------------------
@@ -537,7 +715,52 @@ def cambiar_zona(
 
     return {"mensaje": "Zona actualizada correctamente"}
 
+@app.patch("/api/admin/guardias/{guardia_id}/username")
+def cambiar_username_guardia(
+    guardia_id: int,
+    datos: CambiarUsername,
+    usuario: dict = Depends(solo_admin)
+):
+    nuevo_username = datos.username.strip()
 
+    if not nuevo_username:
+        raise HTTPException(
+            status_code=400,
+            detail="El usuario no puede estar vacío"
+        )
+
+    with conectar() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM usuarios WHERE username = %s AND id != %s",
+                (nuevo_username, guardia_id)
+            )
+
+            if cur.fetchone():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ese nombre de usuario ya está en uso"
+                )
+
+            cur.execute(
+                """
+                UPDATE usuarios
+                SET username = %s
+                WHERE id = %s AND rol = 'guardia'
+                RETURNING id, username, rol, zona_id, activo
+                """,
+                (nuevo_username, guardia_id)
+            )
+
+            guardia = cur.fetchone()
+
+            if not guardia:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Guardia no encontrado"
+                )
+
+    return guardia
 @app.patch("/api/admin/guardias/{guardia_id}/estado")
 def cambiar_estado(
     guardia_id: int,
